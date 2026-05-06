@@ -591,6 +591,15 @@ public sealed class vArtful : Command
         public double EarthElevation;
         public Point3d ModelBasepoint;
         public List<(Guid ViewportId, ConstructionPlane CPlane)> ViewportGrids = new();
+
+        // Table state — fully synced on undo/redo so all Apply* changes are reversible.
+        public List<(string Key, string? Value)>          DocStrings    = new();
+        public List<Linetype>                             Linetypes     = new();
+        public List<HatchPattern>                         HatchPatterns = new();
+        public List<DimensionStyle>                       DimStyles     = new();
+        public List<Material>                             Materials     = new();
+        public List<Rhino.DocObjects.ViewInfo>            NamedViews    = new();
+        public List<(string Name, ConstructionPlane Cp)>  NamedCPlanes  = new();
     }
 
     private static DocSettingsSnapshot TakeDocSnapshot(RhinoDoc doc)
@@ -656,6 +665,79 @@ public sealed class vArtful : Command
                 catch { }
         }
         catch { }
+
+        // Table state
+        try
+        {
+            for (int i = 0; i < doc.Strings.Count; i++)
+            {
+                var key = doc.Strings.GetKey(i);
+                if (!string.IsNullOrEmpty(key))
+                    s.DocStrings.Add((key, doc.Strings.GetValue(i)));
+            }
+        }
+        catch { }
+        try
+        {
+            for (int i = 0; i < doc.Linetypes.Count; i++)
+            {
+                var lt = doc.Linetypes[i];
+                if (lt != null && !lt.IsDeleted && !string.IsNullOrEmpty(lt.Name))
+                    s.Linetypes.Add(lt);
+            }
+        }
+        catch { }
+        try
+        {
+            for (int i = 0; i < doc.HatchPatterns.Count; i++)
+            {
+                var hp = doc.HatchPatterns[i];
+                if (hp != null && !hp.IsDeleted && !string.IsNullOrEmpty(hp.Name))
+                    s.HatchPatterns.Add(hp);
+            }
+        }
+        catch { }
+        try
+        {
+            for (int i = 0; i < doc.DimStyles.Count; i++)
+            {
+                var ds = doc.DimStyles[i];
+                if (ds != null && !ds.IsDeleted && !string.IsNullOrEmpty(ds.Name))
+                    s.DimStyles.Add(ds);
+            }
+        }
+        catch { }
+        try
+        {
+            for (int i = 0; i < doc.Materials.Count; i++)
+            {
+                var mat = doc.Materials[i];
+                if (mat != null && !mat.IsDeleted && !string.IsNullOrEmpty(mat.Name))
+                    s.Materials.Add(mat);
+            }
+        }
+        catch { }
+        try
+        {
+            for (int i = 0; i < doc.NamedViews.Count; i++)
+            {
+                var v = doc.NamedViews[i];
+                if (v != null && !string.IsNullOrEmpty(v.Name))
+                    s.NamedViews.Add(v);
+            }
+        }
+        catch { }
+        try
+        {
+            for (int i = 0; i < doc.NamedConstructionPlanes.Count; i++)
+            {
+                var cp = doc.NamedConstructionPlanes[i];
+                if (!string.IsNullOrEmpty(cp.Name))
+                    s.NamedCPlanes.Add((cp.Name, cp));
+            }
+        }
+        catch { }
+
         return s;
     }
 
@@ -728,6 +810,130 @@ public sealed class vArtful : Command
             }
         }
         catch { }
+
+        // ── Table sync (handles both undo and redo) ───────────────────────────
+
+        // Document strings
+        try
+        {
+            var snapshotKeys = new HashSet<string>(s.DocStrings.Select(x => x.Key), StringComparer.Ordinal);
+            for (int i = doc.Strings.Count - 1; i >= 0; i--)
+            {
+                var key = doc.Strings.GetKey(i);
+                if (!string.IsNullOrEmpty(key) && !snapshotKeys.Contains(key))
+                    try { doc.Strings.Delete(key); } catch { }
+            }
+            foreach (var (key, value) in s.DocStrings)
+                try { doc.Strings.SetString(key, value ?? string.Empty); } catch { }
+        }
+        catch { }
+
+        // Linetypes
+        try
+        {
+            var snapshotNames = new HashSet<string>(s.Linetypes.Select(l => l.Name!), StringComparer.OrdinalIgnoreCase);
+            for (int i = doc.Linetypes.Count - 1; i >= 0; i--)
+            {
+                var lt = doc.Linetypes[i];
+                if (lt == null || lt.IsDeleted || string.IsNullOrEmpty(lt.Name)) continue;
+                if (!snapshotNames.Contains(lt.Name))
+                    try { doc.Linetypes.Delete(lt); } catch { }
+            }
+            foreach (var lt in s.Linetypes)
+                if (doc.Linetypes.Find(lt.Name) < 0)
+                    try { doc.Linetypes.Add(lt); } catch { }
+        }
+        catch { }
+
+        // Hatch patterns
+        try
+        {
+            var snapshotNames = new HashSet<string>(s.HatchPatterns.Select(h => h.Name!), StringComparer.OrdinalIgnoreCase);
+            for (int i = doc.HatchPatterns.Count - 1; i >= 0; i--)
+            {
+                var hp = doc.HatchPatterns[i];
+                if (hp == null || hp.IsDeleted || string.IsNullOrEmpty(hp.Name)) continue;
+                if (!snapshotNames.Contains(hp.Name))
+                    try { doc.HatchPatterns.Delete(hp, true); } catch { }
+            }
+            foreach (var hp in s.HatchPatterns)
+                if (doc.HatchPatterns.FindName(hp.Name) == null)
+                    try { doc.HatchPatterns.Add(hp); } catch { }
+        }
+        catch { }
+
+        // Dim styles — no Delete API; restore modified + add missing
+        try
+        {
+            foreach (var ds in s.DimStyles)
+            {
+                if (string.IsNullOrEmpty(ds.Name)) continue;
+                var existing = doc.DimStyles.FindName(ds.Name);
+                if (existing != null)
+                    try { doc.DimStyles.Modify(ds, existing.Index, true); } catch { }
+                else
+                    try { doc.DimStyles.Add(ds, false); } catch { }
+            }
+        }
+        catch { }
+
+        // Materials
+        try
+        {
+            var snapshotNames = new HashSet<string>(s.Materials.Select(m => m.Name!), StringComparer.OrdinalIgnoreCase);
+            for (int i = doc.Materials.Count - 1; i >= 0; i--)
+            {
+                var mat = doc.Materials[i];
+                if (mat == null || mat.IsDeleted || string.IsNullOrEmpty(mat.Name)) continue;
+                if (!snapshotNames.Contains(mat.Name))
+                    try { doc.Materials.Delete(mat); } catch { }
+            }
+            foreach (var mat in s.Materials)
+                if (doc.Materials.Find(mat.Name, true) < 0)
+                    try { doc.Materials.Add(mat); } catch { }
+        }
+        catch { }
+
+        // Named views
+        try
+        {
+            var snapshotNames = new HashSet<string>(s.NamedViews.Select(v => v.Name!), StringComparer.OrdinalIgnoreCase);
+            for (int i = doc.NamedViews.Count - 1; i >= 0; i--)
+            {
+                var v = doc.NamedViews[i];
+                if (v == null || string.IsNullOrEmpty(v.Name)) continue;
+                if (!snapshotNames.Contains(v.Name))
+                    try { doc.NamedViews.Delete(i); } catch { }
+            }
+            foreach (var v in s.NamedViews)
+                if (doc.NamedViews.FindByName(v.Name) < 0)
+                    try { doc.NamedViews.Add(v); } catch { }
+        }
+        catch { }
+
+        // Named cplanes
+        try
+        {
+            var snapshotNames = new HashSet<string>(s.NamedCPlanes.Select(x => x.Name), StringComparer.OrdinalIgnoreCase);
+            for (int i = doc.NamedConstructionPlanes.Count - 1; i >= 0; i--)
+            {
+                var cp = doc.NamedConstructionPlanes[i];
+                if (string.IsNullOrEmpty(cp.Name)) continue;
+                if (!snapshotNames.Contains(cp.Name))
+                    try { doc.NamedConstructionPlanes.Delete(i); } catch { }
+            }
+            foreach (var (name, cp) in s.NamedCPlanes)
+            {
+                bool exists = false;
+                for (int j = 0; j < doc.NamedConstructionPlanes.Count; j++)
+                    if (string.Equals(doc.NamedConstructionPlanes[j].Name, name, StringComparison.OrdinalIgnoreCase))
+                    { exists = true; break; }
+                if (!exists)
+                    try { doc.NamedConstructionPlanes.Add(cp); } catch { }
+            }
+        }
+        catch { }
+
         doc.Views.Redraw();
     }
 
