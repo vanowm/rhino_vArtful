@@ -1,5 +1,6 @@
 using Rhino;
 using Rhino.PlugIns;
+using System.Reflection;
 
 namespace VArtful;
 
@@ -18,7 +19,11 @@ public sealed class VArtfulPlugIn : PlugIn
 
     protected override LoadReturnCode OnLoad(ref string errorMessage)
     {
-        var version = GetType().Assembly.GetName().Version?.ToString() ?? "unknown";
+        var asm     = GetType().Assembly;
+        var version = asm.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
+                         ?.InformationalVersion
+                      ?? asm.GetName().Version?.ToString()
+                      ?? "unknown";
         RhinoApp.WriteLine($"vArtful v{version} loaded.");
         return LoadReturnCode.Success;
     }
