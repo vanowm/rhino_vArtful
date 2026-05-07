@@ -20,8 +20,9 @@ public sealed class VArtfulPlugIn : PlugIn
     protected override LoadReturnCode OnLoad(ref string errorMessage)
     {
         var asm     = GetType().Assembly;
-        var version = asm.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
-                         ?.InformationalVersion
+        var version = (!string.IsNullOrEmpty(asm.Location)
+                         ? System.Diagnostics.FileVersionInfo.GetVersionInfo(asm.Location).FileVersion
+                         : null)
                       ?? asm.GetName().Version?.ToString()
                       ?? "unknown";
         RhinoApp.WriteLine($"vArtful v{version} loaded.");
