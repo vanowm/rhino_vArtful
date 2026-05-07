@@ -9,10 +9,10 @@
     <Title>vArtful</Title>
     <RootNamespace>VArtful</RootNamespace>
     <LangVersion>latest</LangVersion>
-    <Version>26.05.07.090903</Version>
-    <InformationalVersion>26.05.07.090903</InformationalVersion>
-    <AssemblyVersion>26.5.7.909</AssemblyVersion>
-    <FileVersion>26.5.7.909</FileVersion>
+    <Version>26.5.7.956</Version>
+    <InformationalVersion>26.5.7.956</InformationalVersion>
+    <AssemblyVersion>26.5.7.956</AssemblyVersion>
+    <FileVersion>26.5.7.956</FileVersion>
     <!-- Fail fast when output files are locked (no retry loop). -->
     <CopyRetryCount>0</CopyRetryCount>
     <CopyRetryDelayMilliseconds>0</CopyRetryDelayMilliseconds>
