@@ -1,14 +1,18 @@
+// Modified: 2026-06-18 12:07:19 EDT
 using Rhino;
 using Rhino.Commands;
 using Rhino.DocObjects;
 using Rhino.FileIO;
 using Rhino.Geometry;
+using Rhino.Input;
+using Rhino.Input.Custom;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using SysEnv = System.Environment;
 
 namespace VArtful.Commands;
@@ -20,19 +24,325 @@ namespace VArtful.Commands;
 /// vFileTypeTemplate: document settings, notes, location, document strings, layers,
 /// linetypes, hatch patterns, dim styles, materials, named views, named cplanes,
 /// runtime settings via headless doc), then performs the Artful-specific cleanup:
-///   1) Set current layer to "- Traced -" (create if missing).
-///   2) Move all objects from root-level numeric layers ("0", "1", "2", …) into ". Proliner .".
+///   1) Set current layer to the configured traced layer (default "---[ Traced ]---").
+///   2) Move all objects from root-level numeric layers ("0", "1", "2", …) into the configured proliner layer (default ". Proliner .").
 ///   3) Delete those numeric layers.
 ///   4) Sort remaining layers to match the template order.
 ///
 /// Everything runs inside a single undo record; doc properties are also undoable
 /// via a custom undo event.
 /// </summary>
+internal static class VArtfulSettings
+{
+    public const string DefaultTracedLayer   = "---[ Traced ]---";
+    public const string DefaultProlinerLayer = ". Proliner .";
+
+    private static readonly string SettingsPath = GetSettingsPath();
+
+    private static bool _loaded;
+    private static string _tracedLayer   = DefaultTracedLayer;
+    private static string _prolinerLayer = DefaultProlinerLayer;
+
+    public static string TracedLayer
+    {
+        get { Load(); return NormalizeLayerName(_tracedLayer, DefaultTracedLayer); }
+    }
+
+    public static string ProlinerLayer
+    {
+        get { Load(); return NormalizeLayerName(_prolinerLayer, DefaultProlinerLayer); }
+    }
+
+    public static string SettingsFilePath => SettingsPath;
+
+    public static void SetLayerNames(string tracedLayer, string prolinerLayer)
+    {
+        Load();
+        _tracedLayer   = NormalizeLayerName(tracedLayer,   DefaultTracedLayer);
+        _prolinerLayer = NormalizeLayerName(prolinerLayer, DefaultProlinerLayer);
+        Save();
+    }
+
+    public static void Reset()
+    {
+        _tracedLayer   = DefaultTracedLayer;
+        _prolinerLayer = DefaultProlinerLayer;
+        _loaded        = true;
+        Save();
+    }
+
+    private static string GetSettingsPath()
+    {
+        try
+        {
+            var dllPath = typeof(VArtfulSettings).Assembly.Location;
+            var dllDir  = Path.GetDirectoryName(dllPath);
+            if (!string.IsNullOrEmpty(dllDir))
+                return Path.Combine(dllDir, "vArtfulOptions.json");
+        }
+        catch { }
+
+        return Path.Combine(SysEnv.CurrentDirectory, "vArtfulOptions.json");
+    }
+
+    private static void Load()
+    {
+        if (_loaded) return;
+        _loaded = true;
+
+        try
+        {
+            if (!File.Exists(SettingsPath)) return;
+
+            var json = File.ReadAllText(SettingsPath);
+            var traced = ReadJsonString(json, "TracedLayer");
+            var proliner = ReadJsonString(json, "ProlinerLayer");
+
+            if (traced != null)
+                _tracedLayer = NormalizeLayerName(traced, DefaultTracedLayer);
+            if (proliner != null)
+                _prolinerLayer = NormalizeLayerName(proliner, DefaultProlinerLayer);
+        }
+        catch
+        {
+            _tracedLayer   = DefaultTracedLayer;
+            _prolinerLayer = DefaultProlinerLayer;
+        }
+    }
+
+    private static void Save()
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(SettingsPath);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+
+            var json = new StringBuilder();
+            json.AppendLine("{");
+            json.AppendLine($"  \"TracedLayer\": \"{EscapeJson(_tracedLayer)}\",");
+            json.AppendLine($"  \"ProlinerLayer\": \"{EscapeJson(_prolinerLayer)}\"");
+            json.AppendLine("}");
+
+            File.WriteAllText(SettingsPath, json.ToString(), Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            RhinoApp.WriteLine($"vArtfulOptions: Could not save settings: {ex.Message}");
+        }
+    }
+
+    private static string NormalizeLayerName(string? name, string fallback)
+    {
+        var value = (name ?? string.Empty).Trim();
+        return value.Length == 0 ? fallback : value;
+    }
+
+    private static string? ReadJsonString(string json, string key)
+    {
+        int keyPos = FindJsonProperty(json, key);
+        if (keyPos < 0) return null;
+
+        int colon = json.IndexOf(':', keyPos);
+        if (colon < 0) return null;
+
+        int start = colon + 1;
+        while (start < json.Length && char.IsWhiteSpace(json[start])) start++;
+        if (start >= json.Length || json[start] != '\"') return null;
+
+        start++;
+        var sb = new StringBuilder();
+        for (int i = start; i < json.Length; i++)
+        {
+            char ch = json[i];
+            if (ch == '\"')
+                return sb.ToString();
+
+            if (ch != '\\')
+            {
+                sb.Append(ch);
+                continue;
+            }
+
+            if (++i >= json.Length) break;
+            char esc = json[i];
+            switch (esc)
+            {
+                case '\"': sb.Append('\"'); break;
+                case '\\': sb.Append('\\'); break;
+                case '/': sb.Append('/'); break;
+                case 'b': sb.Append('\b'); break;
+                case 'f': sb.Append('\f'); break;
+                case 'n': sb.Append('\n'); break;
+                case 'r': sb.Append('\r'); break;
+                case 't': sb.Append('\t'); break;
+                case 'u':
+                    if (i + 4 < json.Length)
+                    {
+                        var hex = json.Substring(i + 1, 4);
+                        if (int.TryParse(hex, System.Globalization.NumberStyles.HexNumber, null, out int code))
+                        {
+                            sb.Append((char)code);
+                            i += 4;
+                        }
+                    }
+                    break;
+                default:
+                    sb.Append(esc);
+                    break;
+            }
+        }
+
+        return null;
+    }
+
+    private static int FindJsonProperty(string json, string key)
+    {
+        string quotedKey = "\"" + key + "\"";
+        return json.IndexOf(quotedKey, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string EscapeJson(string value)
+    {
+        var sb = new StringBuilder();
+        foreach (char ch in value ?? string.Empty)
+        {
+            switch (ch)
+            {
+                case '\"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\b': sb.Append("\\b"); break;
+                case '\f': sb.Append("\\f"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (ch < 32)
+                        sb.Append("\\u").Append(((int)ch).ToString("x4"));
+                    else
+                        sb.Append(ch);
+                    break;
+            }
+        }
+        return sb.ToString();
+    }
+}
+
+public sealed class vArtfulOptions : Command
+{
+    public override string EnglishName => "vArtfulOptions";
+
+    protected override Result RunCommand(RhinoDoc doc, RunMode mode)
+    {
+        string tracedLayer   = VArtfulSettings.TracedLayer;
+        string prolinerLayer = VArtfulSettings.ProlinerLayer;
+
+        while (true)
+        {
+            var go = new GetOption();
+            go.SetCommandPrompt("vArtful layer options. Press Enter to save and exit");
+            go.AcceptNothing(true);
+
+            int tracedOptionIndex   = go.AddOption("TracedLayer", tracedLayer);
+            int prolinerOptionIndex = go.AddOption("ProlinerLayer", prolinerLayer);
+            int resetOptionIndex    = go.AddOption("Reset");
+
+            var result = go.Get();
+
+            if (result == GetResult.Cancel)
+                return Result.Cancel;
+
+            if (result == GetResult.Nothing)
+            {
+                VArtfulSettings.SetLayerNames(tracedLayer, prolinerLayer);
+                RhinoApp.WriteLine(
+                    $"vArtfulOptions saved: TracedLayer='{VArtfulSettings.TracedLayer}', " +
+                    $"ProlinerLayer='{VArtfulSettings.ProlinerLayer}'.");
+                RhinoApp.WriteLine($"vArtfulOptions file: {VArtfulSettings.SettingsFilePath}");
+                return Result.Success;
+            }
+
+            if (result != GetResult.Option)
+                return go.CommandResult();
+
+            var option = go.Option();
+            if (option == null)
+                continue;
+
+
+            if (option.Index == tracedOptionIndex)
+            {
+                var promptResult = PromptLayerName("Traced layer name", tracedLayer,
+                    VArtfulSettings.DefaultTracedLayer, out var value);
+                if (promptResult != Result.Success)
+                    return promptResult;
+
+                tracedLayer = value;
+                VArtfulSettings.SetLayerNames(tracedLayer, prolinerLayer);
+                continue;
+            }
+
+
+            if (option.Index == prolinerOptionIndex)
+            {
+                var promptResult = PromptLayerName("Proliner layer name", prolinerLayer,
+                    VArtfulSettings.DefaultProlinerLayer, out var value);
+                if (promptResult != Result.Success)
+                    return promptResult;
+
+                prolinerLayer = value;
+                VArtfulSettings.SetLayerNames(tracedLayer, prolinerLayer);
+                continue;
+            }
+
+
+            if (option.Index == resetOptionIndex)
+            {
+                VArtfulSettings.Reset();
+                tracedLayer   = VArtfulSettings.TracedLayer;
+                prolinerLayer = VArtfulSettings.ProlinerLayer;
+                RhinoApp.WriteLine(
+                    $"vArtfulOptions reset: TracedLayer='{tracedLayer}', " +
+                    $"ProlinerLayer='{prolinerLayer}'.");
+                continue;
+            }
+        }
+    }
+
+    private static Result PromptLayerName(string prompt, string currentValue, string fallback, out string value)
+    {
+        value = currentValue;
+
+        var gs = new GetString();
+        gs.SetCommandPrompt(prompt);
+        gs.SetDefaultString(currentValue);
+        gs.AcceptNothing(true);
+
+        var result = gs.Get();
+        if (result == GetResult.Cancel)
+            return Result.Cancel;
+
+        if (result == GetResult.Nothing)
+            return Result.Success;
+
+        if (result == GetResult.String)
+        {
+            value = CleanCommandValue(gs.StringResult(), fallback);
+            return Result.Success;
+        }
+
+        return gs.CommandResult();
+    }
+
+    private static string CleanCommandValue(string? value, string fallback)
+    {
+        value = (value ?? string.Empty).Trim();
+        return value.Length == 0 ? fallback : value;
+    }
+}
+
 public sealed class vArtful : Command
 {
-    private const string TracedLayer  = "- Traced -";
-    private const string ProlineLayer = ". Proliner .";
-
     private static readonly string TemplatePath = Path.Combine(
         SysEnv.GetFolderPath(SysEnv.SpecialFolder.ApplicationData),
         @"McNeel\Rhinoceros\8.0\Localization\en-US\Template Files\Artful.3dm");
@@ -80,8 +390,11 @@ public sealed class vArtful : Command
                 ApplyRuntimeSettings(doc, headlessDoc);
 
             // ── Phase 3: Artful-specific layer cleanup ────────────────────────
-            int prolineIdx = EnsureLayer(doc, ProlineLayer);
-            int tracedIdx  = EnsureLayer(doc, TracedLayer);
+            string tracedLayer   = VArtfulSettings.TracedLayer;
+            string prolinerLayer = VArtfulSettings.ProlinerLayer;
+
+            int prolinerIdx = EnsureLayer(doc, prolinerLayer);
+            int tracedIdx   = EnsureLayer(doc, tracedLayer);
 
             doc.Layers.SetCurrentLayerIndex(tracedIdx, true);
 
@@ -97,9 +410,9 @@ public sealed class vArtful : Command
                     layer.IsVisible = true;
                     doc.Layers.Modify(layer, layer.Index, true);
                 }
-                int moved = MoveObjectsToLayer(doc, layer.Index, prolineIdx);
+                int moved = MoveObjectsToLayer(doc, layer.Index, prolinerIdx);
                 totalMoved += moved;
-                RhinoApp.WriteLine($"  Moved {moved} obj(s) from '{layer.Name}' → '{ProlineLayer}'.");
+                RhinoApp.WriteLine($"  Moved {moved} obj(s) from '{layer.Name}' → '{prolinerLayer}'.");
             }
 
             int deletedCount = 0;
@@ -121,8 +434,8 @@ public sealed class vArtful : Command
 
             doc.Views.Redraw();
             RhinoApp.WriteLine(
-                $"vArtful complete: current layer '{TracedLayer}', " +
-                $"moved {totalMoved} obj(s) to '{ProlineLayer}', " +
+                $"vArtful complete: current layer '{tracedLayer}', " +
+                $"moved {totalMoved} obj(s) to '{prolinerLayer}', " +
                 $"deleted {deletedCount} numeric layer(s), " +
                 $"sorted {sortedCount} layer(s).");
 
