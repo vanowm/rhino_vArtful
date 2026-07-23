@@ -25,6 +25,8 @@ public sealed class VArtfulPlugIn : PlugIn
                          : null)
                       ?? asm.GetName().Version?.ToString()
                       ?? "unknown";
+        Log.Initialize();
+        Log.Write($"startup  rhino={RhinoApp.Version}  version={version}  dll={asm.Location}");
         RhinoApp.WriteLine($"vArtful v{version} loaded.");
         return LoadReturnCode.Success;
     }

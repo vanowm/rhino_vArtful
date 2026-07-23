@@ -1,4 +1,4 @@
-# vArtful  ·  v26.7.23.1750
+# vArtful  ·  v26.7.23.1803
 
 vArtful is a Rhino 8 and Rhino 9 plug-in that applies the `Artful.3dm` template to the active document and organizes the document for the Artful layer workflow.
 
@@ -52,6 +52,8 @@ The Release plug-ins are:
 
 - `bin/Release/net7.0-windows/vArtful.dll` for Rhino 8
 - `bin/Release/net10.0-windows/vArtful.dll` for Rhino 9 Load it with Rhino's Plug-in Manager and keep `vArtfulOptions.json` beside the DLL when deploying custom defaults.
+
+Runtime diagnostics are written to `vArtful.log` beside the loaded DLL. The file is cleared at startup and begins with the Rhino and plug-in versions.
 
 ## Versioning
 
