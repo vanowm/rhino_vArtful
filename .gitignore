@@ -8,6 +8,9 @@ bin/Release/*
 !bin/Release/net7.0-windows/
 bin/Release/net7.0-windows/*
 !bin/Release/net7.0-windows/vArtful.dll
+!bin/Release/net10.0-windows/
+bin/Release/net10.0-windows/*
+!bin/Release/net10.0-windows/vArtful.dll
 
 # User/IDE files
 .vs/

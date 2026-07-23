@@ -1,6 +1,6 @@
-# vArtful  ·  v26.7.23.016
+# vArtful  ·  v26.7.23.1750
 
-vArtful is a Rhino 8 plug-in that applies the `Artful.3dm` template to the active document and organizes the document for the Artful layer workflow.
+vArtful is a Rhino 8 and Rhino 9 plug-in that applies the `Artful.3dm` template to the active document and organizes the document for the Artful layer workflow.
 
 ## Features
 
@@ -19,8 +19,8 @@ vArtful is a Rhino 8 plug-in that applies the `Artful.3dm` template to the activ
 
 ## Requirements
 
-- Rhino 8 for Windows
-- .NET 7 SDK or newer to build
+- Rhino 8 and Rhino 9 for Windows
+- .NET 10 SDK with the .NET 7 targeting pack to build
 - `Artful.3dm` in Rhino 8's English template folder under `%APPDATA%`, unless the source template location is customized
 
 ## Configuration
@@ -44,11 +44,14 @@ From the repository folder:
 .\build.ps1
 ```
 
-The default Release build does not require Git and never commits or pushes. Maintainers can use `.\build.ps1 -Publish` to build, create a signed semantic commit when the DLL changes, push `master`, and publish a GitHub release containing the DLL and any generated `.rui` files.
+The default Release build does not require Git and never commits or pushes. Maintainers can use `.\build.ps1 -Publish` to build, create a signed semantic commit when the DLL changes, push `master`, and publish a GitHub release containing separate Rhino 8/.NET 7 and Rhino 9/.NET 10 DLLs, plus any generated `.rui` files.
 
 ## Installation
 
-The Release plug-in is `bin/Release/net7.0-windows/vArtful.dll`. Load it with Rhino's Plug-in Manager and keep `vArtfulOptions.json` beside the DLL when deploying custom defaults.
+The Release plug-ins are:
+
+- `bin/Release/net7.0-windows/vArtful.dll` for Rhino 8
+- `bin/Release/net10.0-windows/vArtful.dll` for Rhino 9 Load it with Rhino's Plug-in Manager and keep `vArtfulOptions.json` beside the DLL when deploying custom defaults.
 
 ## Versioning
 
