@@ -7,10 +7,6 @@ using Rhino.PlugIns;
 [assembly: AssemblyProduct("vArtful")]
 [assembly: ComVisible(false)]
 [assembly: Guid("e65c3282-3c23-408e-901e-86d82dd41070")]
-[assembly: AssemblyVersion("26.5.7.956")]
-[assembly: AssemblyFileVersion("26.5.7.956")]
-[assembly: AssemblyInformationalVersion("26.5.7.956")]
-
 [assembly: PlugInDescription(DescriptionType.Organization, "")]
 [assembly: PlugInDescription(DescriptionType.Address, "")]
 [assembly: PlugInDescription(DescriptionType.Country, "")]
