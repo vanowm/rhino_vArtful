@@ -36,6 +36,8 @@ Settings are stored in `vArtfulOptions.json` beside the plug-in DLL.
 
 Changes made through `vArtfulOptions` are saved immediately.
 
+During every build, missing default properties are merged into the existing options file in each framework output. Existing layer names are never replaced.
+
 ## Build
 
 From the repository folder:
@@ -51,7 +53,9 @@ The default Release build does not require Git and never commits or pushes. Main
 The Release plug-ins are:
 
 - `bin/Release/net7.0-windows/vArtful.dll` for Rhino 8
-- `bin/Release/net10.0-windows/vArtful.dll` for Rhino 9 Load it with Rhino's Plug-in Manager and keep `vArtfulOptions.json` beside the DLL when deploying custom defaults.
+- `bin/Release/net10.0-windows/vArtful.dll` for Rhino 9
+
+Load it with Rhino's Plug-in Manager and keep `vArtfulOptions.json` beside the DLL when deploying custom defaults.
 
 Runtime diagnostics are written to `vArtful.log` beside the loaded DLL. The file is cleared at startup and begins with the Rhino and plug-in versions.
 
