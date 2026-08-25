@@ -376,11 +376,11 @@ public sealed class vArtful : Command
             ApplyNotes(doc, templateFile);
             ApplyLocation(doc, templateFile);
             ApplyDocumentStrings(doc, templateFile);
-            ApplyLayers(doc, templateFile);
-            ApplyLinetypes(doc, templateFile);
+            var linetypeIndexMap = ApplyLinetypes(doc, templateFile);
+            var materialIndexMap = ApplyMaterials(doc, templateFile);
+            ApplyLayers(doc, templateFile, linetypeIndexMap, materialIndexMap);
             ApplyHatchPatterns(doc, templateFile);
             ApplyDimStyles(doc, templateFile);
-            ApplyMaterials(doc, templateFile);
             ApplyNamedViews(doc, templateFile);
             ApplyNamedCPlanes(doc, templateFile);
 
@@ -515,67 +515,286 @@ public sealed class vArtful : Command
         catch { }
     }
 
-    private static void ApplyLayers(RhinoDoc doc, File3dm f)
+    private static void ApplyLayers(
+        RhinoDoc doc,
+        File3dm f,
+        IReadOnlyDictionary<int, int> linetypeIndexMap,
+        IReadOnlyDictionary<int, int> materialIndexMap)
     {
         try
         {
-            foreach (var tLayer in f.AllLayers)
-            {
-                if (tLayer == null || tLayer.IsDeleted) continue;
-                var fp = tLayer.FullPath;
-                if (string.IsNullOrEmpty(fp)) continue;
+            int totalLayers = 0, addedLayers = 0, updatedLayers = 0, failedLayers = 0;
+            int sourcePrintWidths = 0, sourceLinetypes = 0, attributeMismatches = 0;
+            var documentLayerIds = new Dictionary<Guid, Guid>();
+            var processedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var pathsBeingProcessed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                int idx = doc.Layers.FindByFullPath(fp, -1);
-                if (idx >= 0)
+            // Map every existing layer first so new children can retain their hierarchy
+            // even when their parent is processed later in the template table.
+            foreach (var templateLayer in f.AllLayers)
+            {
+                if (templateLayer == null || templateLayer.IsDeleted)
+                    continue;
+
+                totalLayers++;
+                if (templateLayer.PlotWeight != 0.0)
+                    sourcePrintWidths++;
+                if (templateLayer.LinetypeIndex >= 0)
+                    sourceLinetypes++;
+                var fullPath = templateLayer.FullPath;
+                if (string.IsNullOrEmpty(fullPath))
+                    continue;
+
+                var existingIndex = doc.Layers.FindByFullPath(fullPath, -1);
+                var existingLayer = existingIndex >= 0 ? doc.Layers.FindIndex(existingIndex) : null;
+                if (existingLayer != null && templateLayer.Id != Guid.Empty)
+                    documentLayerIds[templateLayer.Id] = existingLayer.Id;
+            }
+
+            int TransferLayer(Layer templateLayer)
+            {
+                var fullPath = templateLayer.FullPath;
+                if (string.IsNullOrEmpty(fullPath))
+                    return -1;
+
+                if (processedPaths.Contains(fullPath))
+                    return doc.Layers.FindByFullPath(fullPath, -1);
+
+                if (!pathsBeingProcessed.Add(fullPath))
                 {
-                    // Update color on existing layers (Artful workflow needs correct colors).
-                    try
+                    Log.Write($"ApplyLayers: cyclic parent hierarchy detected at '{fullPath}'.");
+                    failedLayers++;
+                    return -1;
+                }
+
+                try
+                {
+                    var documentParentId = Guid.Empty;
+                    if (templateLayer.ParentLayerId != Guid.Empty)
                     {
-                        var lyr = doc.Layers[idx];
-                        lyr.Color = tLayer.Color;
-                        doc.Layers.Modify(lyr, idx, true);
+                        if (!documentLayerIds.TryGetValue(templateLayer.ParentLayerId, out documentParentId))
+                        {
+                            var templateParent = f.AllLayers.FindId(templateLayer.ParentLayerId);
+                            if (templateParent == null || TransferLayer(templateParent) < 0 ||
+                                !documentLayerIds.TryGetValue(templateLayer.ParentLayerId, out documentParentId))
+                            {
+                                Log.Write($"ApplyLayers: parent for '{fullPath}' could not be transferred.");
+                                failedLayers++;
+                                return -1;
+                            }
+                        }
                     }
-                    catch { }
+
+                    var layerSettings = CreateLayerSettings(
+                        templateLayer,
+                        documentParentId,
+                        linetypeIndexMap,
+                        materialIndexMap);
+
+                    var existingIndex = doc.Layers.FindByFullPath(fullPath, -1);
+                    if (existingIndex >= 0)
+                    {
+                        var existingLayer = doc.Layers.FindIndex(existingIndex);
+                        if (existingLayer == null)
+                            return -1;
+
+                        var existingLayerId = existingLayer.Id;
+                        layerSettings.Id = existingLayerId;
+                        layerSettings.Index = existingLayer.Index;
+                        if (!doc.Layers.Modify(layerSettings, existingIndex, true))
+                        {
+                            Log.Write($"ApplyLayers: failed to update '{fullPath}'.");
+                            failedLayers++;
+                            return -1;
+                        }
+
+                        if (templateLayer.Id != Guid.Empty)
+                            documentLayerIds[templateLayer.Id] = existingLayerId;
+                        VerifyLayerAttributes(fullPath, layerSettings, existingIndex);
+                        updatedLayers++;
+                        processedPaths.Add(fullPath);
+                        return existingIndex;
+                    }
+
+                    var addedIndex = doc.Layers.Add(layerSettings);
+                    if (addedIndex < 0)
+                    {
+                        Log.Write($"ApplyLayers: failed to add '{fullPath}'.");
+                        failedLayers++;
+                        return -1;
+                    }
+
+                    var addedLayer = doc.Layers.FindIndex(addedIndex);
+                    if (addedLayer != null && templateLayer.Id != Guid.Empty)
+                        documentLayerIds[templateLayer.Id] = addedLayer.Id;
+                    VerifyLayerAttributes(fullPath, layerSettings, addedIndex);
+                    addedLayers++;
+                    processedPaths.Add(fullPath);
+                    return addedIndex;
+                }
+                catch (Exception layerEx)
+                {
+                    Log.Write($"ApplyLayers: failed to transfer '{fullPath}': {layerEx.Message}");
+                    failedLayers++;
+                    return -1;
+                }
+                finally
+                {
+                    pathsBeingProcessed.Remove(fullPath);
+                }
+            }
+
+            void VerifyLayerAttributes(string fullPath, Layer expected, int layerIndex)
+            {
+                var applied = doc.Layers.FindIndex(layerIndex);
+                if (applied == null)
+                    return;
+
+                var mismatches = new List<string>();
+                if (applied.Color.ToArgb() != expected.Color.ToArgb())
+                    mismatches.Add($"color={applied.Color} expected={expected.Color}");
+                if (applied.PlotColor.ToArgb() != expected.PlotColor.ToArgb())
+                    mismatches.Add($"plotColor={applied.PlotColor} expected={expected.PlotColor}");
+                if (applied.PlotWeight != expected.PlotWeight)
+                    mismatches.Add($"plotWeight={applied.PlotWeight} expected={expected.PlotWeight}");
+                if (applied.LinetypeIndex != expected.LinetypeIndex)
+                    mismatches.Add($"linetypeIndex={applied.LinetypeIndex} expected={expected.LinetypeIndex}");
+                if (applied.RenderMaterialIndex != expected.RenderMaterialIndex)
+                    mismatches.Add($"materialIndex={applied.RenderMaterialIndex} expected={expected.RenderMaterialIndex}");
+                if (applied.IsVisible != expected.IsVisible)
+                    mismatches.Add($"visible={applied.IsVisible} expected={expected.IsVisible}");
+                if (applied.IsLocked != expected.IsLocked)
+                    mismatches.Add($"locked={applied.IsLocked} expected={expected.IsLocked}");
+
+                if (mismatches.Count > 0)
+                {
+                    attributeMismatches++;
+                    Log.Write($"ApplyLayers: persisted attribute mismatch for '{fullPath}': {string.Join(", ", mismatches)}");
+                }
+            }
+
+            foreach (var templateLayer in f.AllLayers)
+            {
+                if (templateLayer == null || templateLayer.IsDeleted || string.IsNullOrEmpty(templateLayer.FullPath))
+                    continue;
+                TransferLayer(templateLayer);
+            }
+
+            Log.Write(
+                $"ApplyLayers: total={totalLayers} added={addedLayers} updated={updatedLayers} failed={failedLayers} " +
+                $"source(non-default print widths)={sourcePrintWidths} source(assigned linetypes)={sourceLinetypes} " +
+                $"attribute mismatches={attributeMismatches}");
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"ApplyLayers failed: {ex.Message}");
+        }
+    }
+
+    private static Layer CreateLayerSettings(
+        Layer templateLayer,
+        Guid documentParentId,
+        IReadOnlyDictionary<int, int> linetypeIndexMap,
+        IReadOnlyDictionary<int, int> materialIndexMap)
+    {
+        var layerSettings = new Layer();
+        layerSettings.CopyAttributesFrom(templateLayer);
+        Rhino.DocObjects.Custom.UserData.Copy(templateLayer, layerSettings);
+
+        // CopyAttributesFrom intentionally covers only Rhino's "typical" layer
+        // attributes. Assign every persisted scalar explicitly so fields such as
+        // print width and linetype cannot fall back to destination defaults.
+        layerSettings.Color = templateLayer.Color;
+        layerSettings.PlotColor = templateLayer.PlotColor;
+        layerSettings.PlotWeight = templateLayer.PlotWeight;
+        layerSettings.IsVisible = templateLayer.IsVisible;
+        layerSettings.IsLocked = templateLayer.IsLocked;
+        layerSettings.IsExpanded = templateLayer.IsExpanded;
+        layerSettings.IgesLevel = templateLayer.IgesLevel;
+        layerSettings.PersistentVisibility = templateLayer.PersistentVisibility;
+        layerSettings.ModelIsVisible = templateLayer.ModelIsVisible;
+        layerSettings.ModelPersistentVisibility = templateLayer.ModelPersistentVisibility;
+        layerSettings.PerViewportIsVisibleInNewDetails = templateLayer.PerViewportIsVisibleInNewDetails;
+        layerSettings.SetPersistentLocking(templateLayer.GetPersistentLocking());
+
+        var sectionStyle = templateLayer.GetCustomSectionStyle();
+        if (sectionStyle != null)
+            layerSettings.SetCustomSectionStyle(sectionStyle);
+        else
+            layerSettings.RemoveCustomSectionStyle();
+
+        // Identity and hierarchy belong to the destination document.
+        layerSettings.ClearId();
+        layerSettings.ClearIndex();
+        layerSettings.Name = templateLayer.Name;
+        layerSettings.ParentLayerId = documentParentId;
+
+        layerSettings.LinetypeIndex = templateLayer.LinetypeIndex;
+        if (templateLayer.LinetypeIndex >= 0)
+            layerSettings.LinetypeIndex = linetypeIndexMap.TryGetValue(templateLayer.LinetypeIndex, out var linetypeIndex)
+                ? linetypeIndex
+                : -1;
+
+        layerSettings.RenderMaterialIndex = templateLayer.RenderMaterialIndex;
+        if (templateLayer.RenderMaterialIndex >= 0)
+            layerSettings.RenderMaterialIndex = materialIndexMap.TryGetValue(templateLayer.RenderMaterialIndex, out var materialIndex)
+                ? materialIndex
+                : -1;
+
+        var userStrings = templateLayer.GetUserStrings();
+        if (userStrings != null)
+        {
+            foreach (var key in userStrings.AllKeys)
+            {
+                if (!string.IsNullOrEmpty(key))
+                    layerSettings.SetUserString(key, userStrings[key]);
+            }
+        }
+
+        return layerSettings;
+    }
+
+    private static Dictionary<int, int> ApplyLinetypes(RhinoDoc doc, File3dm f)
+    {
+        var indexMap = new Dictionary<int, int>();
+        try
+        {
+            int added = 0, skipped = 0;
+            foreach (var linetype in f.AllLinetypes)
+            {
+                if (linetype == null || linetype.IsDeleted)
+                    continue;
+
+                var existingIndex = linetype.Id != Guid.Empty ? doc.Linetypes.Find(linetype.Id, true) : -1;
+                if (existingIndex < 0 && !string.IsNullOrEmpty(linetype.Name))
+                    existingIndex = doc.Linetypes.Find(linetype.Name);
+                if (existingIndex >= 0)
+                {
+                    indexMap[linetype.Index] = existingIndex;
+                    skipped++;
                     continue;
                 }
 
                 try
                 {
-                    var newLayer = new Layer
+                    var addedIndex = doc.Linetypes.Add(linetype);
+                    if (addedIndex >= 0)
                     {
-                        Name          = tLayer.Name,
-                        Color         = tLayer.Color,
-                        PlotColor     = tLayer.PlotColor,
-                        PlotWeight    = tLayer.PlotWeight,
-                        IsVisible     = tLayer.IsVisible,
-                        IsLocked      = tLayer.IsLocked,
-                        LinetypeIndex = -1,
-                    };
-                    if (tLayer.ParentLayerId != Guid.Empty)
-                    {
-                        var parent = doc.Layers.FindId(tLayer.ParentLayerId);
-                        if (parent != null) newLayer.ParentLayerId = parent.Id;
+                        indexMap[linetype.Index] = addedIndex;
+                        added++;
                     }
-                    doc.Layers.Add(newLayer);
+                    else
+                        Log.Write($"ApplyLinetypes: failed to add '{linetype.Name}'.");
                 }
-                catch { }
+                catch (Exception ex2) { Log.Write($"ApplyLinetypes: failed to add '{linetype.Name}': {ex2.Message}"); }
             }
+            Log.Write($"ApplyLinetypes: added={added} skipped={skipped}");
         }
-        catch { }
-    }
-
-    private static void ApplyLinetypes(RhinoDoc doc, File3dm f)
-    {
-        try
+        catch (Exception ex)
         {
-            foreach (var lt in f.AllLinetypes)
-            {
-                if (lt == null || lt.IsDeleted || string.IsNullOrEmpty(lt.Name)) continue;
-                if (doc.Linetypes.Find(lt.Name) >= 0) continue;
-                try { doc.Linetypes.Add(lt); } catch { }
-            }
+            Log.Write($"ApplyLinetypes failed: {ex.Message}");
         }
-        catch { }
+        return indexMap;
     }
 
     private static void ApplyHatchPatterns(RhinoDoc doc, File3dm f)
@@ -609,18 +828,47 @@ public sealed class vArtful : Command
         catch { }
     }
 
-    private static void ApplyMaterials(RhinoDoc doc, File3dm f)
+    private static Dictionary<int, int> ApplyMaterials(RhinoDoc doc, File3dm f)
     {
+        var indexMap = new Dictionary<int, int>();
         try
         {
-            foreach (var mat in f.AllMaterials)
+            int added = 0, skipped = 0;
+            foreach (var material in f.AllMaterials)
             {
-                if (mat == null || mat.IsDeleted || string.IsNullOrEmpty(mat.Name)) continue;
-                if (doc.Materials.Find(mat.Name, true) >= 0) continue;
-                try { doc.Materials.Add(mat); } catch { }
+                if (material == null || material.IsDeleted)
+                    continue;
+
+                var existingIndex = material.Id != Guid.Empty ? doc.Materials.Find(material.Id, true) : -1;
+                if (existingIndex < 0 && !string.IsNullOrEmpty(material.Name))
+                    existingIndex = doc.Materials.Find(material.Name, true);
+                if (existingIndex >= 0)
+                {
+                    indexMap[material.Index] = existingIndex;
+                    skipped++;
+                    continue;
+                }
+
+                try
+                {
+                    var addedIndex = doc.Materials.Add(material);
+                    if (addedIndex >= 0)
+                    {
+                        indexMap[material.Index] = addedIndex;
+                        added++;
+                    }
+                    else
+                        Log.Write($"ApplyMaterials: failed to add '{material.Name}'.");
+                }
+                catch (Exception ex2) { Log.Write($"ApplyMaterials: failed to add '{material.Name}': {ex2.Message}"); }
             }
+            Log.Write($"ApplyMaterials: added={added} skipped={skipped}");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Log.Write($"ApplyMaterials failed: {ex.Message}");
+        }
+        return indexMap;
     }
 
     private static void ApplyNamedViews(RhinoDoc doc, File3dm f)

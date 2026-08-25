@@ -1,4 +1,4 @@
-# vArtful  ·  v26.7.23.1803
+# vArtful  ·  v26.8.25.944
 
 vArtful is a Rhino 8 and Rhino 9 plug-in that applies the `Artful.3dm` template to the active document and organizes the document for the Artful layer workflow.
 
